@@ -28,7 +28,7 @@ bash ./setup/install_[DEPENDENCIES].sh  # Installation scripts VarScan, KMC, BWA
 ```
 
 Ensure the following dependencies are installed:
-- **Software**: `samtools>=1.0`, `VarScan==2.4.6`, `KMC>=3.2.0`, `STAR` (RNA mode), `BWA>=0.7.0`  `BWA-MEM2` (DNA mode)
+- **Software**: `samtools>=1.0`, `VarScan==2.4.6`, `KMC>=3.2.0`, `STAR` (RNA mode), `BWA>=0.7.0` or `BWA-MEM2` (DNA mode)
 - **Python Libraries**: `scipy>=0.14.0`, `pyfaidx`
 - **Parallelization**: `GNU parallel>=20160622`
 - **Linux Core Utilities**: `awk`, `wc`, `cut`, `split`
