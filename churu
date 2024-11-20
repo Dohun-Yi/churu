@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+version="1.0.0"
+
+#    This file is part of the CHURU project under the MIT License.
+#    SPDX-License-Identifier: MIT
+#
+#    Author  : Dohun Yi (kutarballoon@gmail.com)
+#    Date    : 2024-05-16
+
+
+# Default parameters
+cpu=8 # number of processors
+k=31 # size of k-mer
+K=5 # minimal prevalence of k-mer for sequencing error filtration
+mpileup_cut=5 # minimum read required for SNP call 
+to=churu_output # output directory
+nucl=rna
+fq1=
+fq2=
+bam=
+genome=
+align_index= # STAR or BWA index
+churu_index=
+ccle_var=
+ccle_expr=
+ccle_model=
+shared=NoSharedMemory
+force=false
+overwrite=false
+aligner=
+
+usage() {
+    local code="$1"
+    echo "Usage: $(basename $0) [-1 fq1] [-2 fq2] [-g file] [-r dir] [-i prefix] [-s file]"
+    echo "Required arguments:"
+    echo "  -1 FILE      first FASTQ file (.gz supported)"
+    echo "  -2 FILE      second FASTQ file (.gz supported)"
+    echo "  -b FILE      BAM file. Do NOT set if using FASTQ"
+    echo "  -g FILE      reference genome FASTA file. (required)"
+    echo "  -r DIR       path to CHURU index (required)"
+    echo "  -s FILE      CCLE somatic mutation file (required)"
+    echo "  -i PREFIX    prefix of mapper index, either STAR (rna mode), BWA or BWA-MEM2 (dna mode) (required for fastq input)"
+    echo "Optional arguments"
+    echo "  -h           show help and quit"
+    echo "  -v           show version and quit"
+    echo "  -e FILE      CCLE expression file. If not set, estimation is not performed"
+    echo "  -m FILE      CCLE model file. If not set, cell line is given as accession number in output"
+    echo "  -o DIR       output directory (default: $to)"
+    echo "  -t INT       number of threads (default: $cpu)"
+    echo "  -K INT       k-mers below this count will be considered sequencing error (default: $K)"
+    echo "  -c INT       minimum depth for SNP call (default: $mpileup_cut)"
+    echo "  -n STR       type of nucleotide {dna|rna} (default: $nucl)"
+    echo "  -f           force mixture estimation (default: $force)"
+    echo "  -w           overwrite output (default: $overwrite)"
+    echo "  -M STR       use shared memory for STAR aligner {NoSharedMemory|LoadAndKeep} (default: $shared)"
+    echo "  -a FILE      path to executable mapper, either STAR/BWA/BWA-MEM2"
+    echo "               depending on type of nucleotide (-n) (default: auto-detect)"
+    echo ""
+    echo "============================================================="
+    echo "Examples:"
+    echo "  Case 1 - paired-end input: "
+    echo "      $(basename $0) -1 fq1 -2 fq2 -g genome.fa -r churu_index -i index_prefix -s variant_file"
+    echo "  Case 2 - single-end input: "
+    echo "      $(basename $0) -1 fq1 -g genome.fa -r churu_index -i index_prefix -s variant_file"
+    echo "  Case 3 - bam input: "
+    echo "      $(basename $0) -b bam -g genome.fa -r churu_index -s variant_file"
+    demo_fq1=demo/demo_1.fastq.gz
+    demo_fq2=demo/demo_2.fastq.gz
+    demo_to=demo/output
+    echo ""
+    echo "============================================================="
+    echo "Demo:"
+    echo "  $(basename $0) -1 $demo_fq1 -2 $demo_fq2 -o $demo_to -g genome.fa -r churu_index -i index_prefix -s variant_file" # TODO: change this part
+    echo ""
+    echo "churu $version"
+    echo ""
+    echo "For support or inquiries, please contact: kutarballoon@gmail.com"
+    if [ -z $code ]; then code=1; fi
+    exit $code
+}
+
+if [[ -z $1 ]]; then
+    echo "No arguments provided" >&2
+    usage
+fi
+
+# TODO: make a DEMO reference
+# TODO: use minimum resources
+
+while getopts ":b:1:2:t:c:K:o:n:M:g:i:r:s:e:m:fwhva:" opt; do
+  case $opt in
+    1) fq1="$OPTARG";;
+    2) fq2="$OPTARG";;
+    b) bam="$OPTARG";;
+    t) cpu="$OPTARG";;
+    c) mpileup_cut="$OPTARG";;
+    K) K="$OPTARG";;
+    o) to="$OPTARG";;
+    n) nucl=$(echo "$OPTARG" | tr '[:upper:]' '[:lower:]');;
+    M) shared="$OPTARG";;
+    g) genome="$OPTARG";;
+    i) align_index="$OPTARG";;
+    r) churu_index="$OPTARG";;
+    s) ccle_var="$OPTARG";;
+    e) ccle_expr="$OPTARG";;
+    m) ccle_model="$OPTARG";;
+    f) force=true;;
+    w) overwrite=true;;
+    a) aligner="$OPTARG";;
+    h) usage 0;;
+    v) echo "churu $version"; exit 0;;
+    \?) echo "Invalid option: -$OPTARG" >&2; usage;;
+    :) echo "Option -$OPTARG requires an argument." >&2; usage;;
+    *) echo "Unknown option: -$OPTARG" >&2; usage;;
+  esac
+done
+
+shift $((OPTIND-1))
+
+# TODO: logic weird here
+if [ -n "$fq1" ] && [ -n "$fq2" ] && [ -n "$bam" ]; then
+    echo "ERROR: FASTQ and BAM is both specified. using only one of them" >&2
+    usage
+fi
+
+if [ -n "$fq1" ] && [ -z "$align_index" ]; then
+    echo "ERROR: -i align_index is required for FASTQ input " >&2
+    usage
+fi
+
+if [ -z "$genome" ] || [ -z "$churu_index" ] || [ -z "$ccle_var" ]; then
+    echo "ERROR: One or more required arguments are not set." >&2
+    usage
+fi
+
+if [ $nucl != "dna" ] && [ $nucl != "rna" ]; then
+    echo "ERROR: -n must be either 'dna' or 'rna'" >&2
+    usage
+fi
+
+if [ $shared != "LoadAndKeep" ] && [ $shared != "NoSharedMemory" ]; then
+    echo "ERROR: -M must be either LoadAndKeep or NoSharedMemory" >&2
+    usage
+fi
+
+if [ -d "$to" ] && [ $overwrite != "true" ]; then
+    echo "ERROR: the output directory already exists. Please specify another name, or consider settig overwrite (-w)" >&2
+    exit 1
+fi
+
+if [ -n "$aligner" ]; then
+    if [ "$nucl" == "rna" ] && [[ "$aligner" != *"STAR"* ]]; then
+        echo "ERROR: For RNA, aligner must be STAR" >&2
+        exit 1
+    elif [ "$nucl" == "dna" ] && [[ "$aligner" != *"bwa"* ]]; then
+        echo "ERROR: For DNA, aligner must be BWA or BWA-MEM2" >&2
+        exit 1
+    elif [[ "$aligner" != *"STAR"* && "$aligner" != *"bwa-mem2"* && "$aligner" != *"bwa"* ]]; then
+        echo "ERROR: Unknown aligner '$aligner'" >&2
+        exit 1
+    fi
+fi
+
+check_file() {
+    local file_path="$1"
+    if [ ! -f "$file_path" ]; then
+        echo "ERROR: Input file '$file_path' not found" >&2
+        exit 1
+    fi
+}
+
+# Check input files
+# the "align_index" is intentionally not checked, since this can be prefix
+check_file "$genome"
+check_file "$genome.fai"
+check_file "$ccle_var"
+if [ -n "$ccle_expr" ]; then check_file "$ccle_expr"; fi
+if [ -n "$ccle_model" ]; then check_file "$ccle_model"; fi
+check_file "$churu_index/${nucl}.kmerdb.bed"
+check_file "$churu_index/${nucl}.kmerdb.fa.kmc.kmc_pre"
+check_file "$churu_index/${nucl}.kmerdb.fa.kmc.kmc_suf"
+check_file "$churu_index/common.kmerdb.pos.bed"
+
+# Validate arguments
+mode="UNKNOWN"
+if [[ -n "$fq1" ]] && [ -f "$fq1" ]; then
+    if [[ -n "$fq2" ]] && [ -f "$fq2" ]; then
+        mode="PAIRED-END"
+    else
+        mode="SINGLE-END"
+        fq2=NONE  # Explicitly set to NONE if not provided
+    fi
+elif [[ -n "$bam" ]] && [ -f "$bam" ]; then
+    mode="BAM"
+    if [ ! -f $bam.bai ]; then
+        echo "ERROR: BAM index file '$bam.bai' not found" >&2
+        exit 1
+    fi
+else
+    echo "ERROR: No valid input files provided (FASTQ/BAM)" >&2
+    usage
+fi
+
+check_dependency() {
+    local program_name=$1
+    local program_path=$(command -v "$program_name" 2> /dev/null)
+    local rootdir=$(dirname $0)
+    if [ -f "$rootdir/$program_name" ]; then
+        echo "$rootdir/$program_name"
+        return 0
+    elif [ -n "$program_path" ]; then
+        echo "$program_path"
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_and_set() {
+    local program_var_name=$1
+    local program_name=$2
+    local program_path
+    if program_path=$(check_dependency "$program_name"); then
+        echo "checking $1... OK" 
+        eval "$program_var_name='$program_path'"
+    else
+        echo "checking $1... Not found"
+        echo "ERROR: Dependency '$program_name' not found" >&2
+        exit 1
+    fi
+}
+
+
+# Display parameter values
+# TODO: modify this too
+echo "--------------------------------------------"
+echo "            CHURU Parameters                "
+echo "--------------------------------------------"
+echo "fq1:         $fq1"
+echo "fq2:         $fq2"
+echo "bam:         $bam"
+echo "mode:        $mode"
+echo "genome:      $genome"
+echo "churu_index: $churu_index"
+echo "align_index: $align_index"
+echo "ccle_var:    $ccle_var"
+echo "ccle_expr:   $ccle_expr"
+echo "ccle_model:  $ccle_model"
+echo "output dir:  $to"
+echo "--------------------------------------------"
+echo "cpu:         $cpu"
+echo "K:           $K"
+echo "c:           $mpileup_cut"
+echo "nucl:        $nucl"
+echo "k:           $k"
+echo "f:           $force"
+echo "M:           $shared"
+echo "overwrite:   $overwrite"
+echo "--------------------------------------------"
+
+check_and_set samtools samtools
+check_and_set varscan VarScan.v2.4.6.jar
+check_and_set churu_identify churu_identify
+check_and_set parallel parallel
+check_and_set java java
+check_and_set awk awk
+check_and_set wc wc # Linux coreutils
+check_and_set cut cut # Linux coreutils
+check_and_set split split # Linux coreutils
+check_and_set python python
+if [ "$mode" != "BAM" ]; then
+    check_and_set kmc kmc
+    check_and_set kmctools kmc_tools
+    check_and_set churu_filter churu_filter
+fi
+
+if [ -n "$aligner" ]; then
+    check_file "$aligner"
+    check_and_set aligner "$aligner"
+elif [ "$nucl" == "rna" ]; then
+    check_and_set aligner STAR
+elif [ "$nucl" == "dna" ]; then
+    aligner=$(check_dependency "bwa-mem2")
+    if [ $? -ne 0 ]; then
+        echo "bwa-mem2 not found. finding bwa as replacement..."
+        check_and_set aligner bwa
+    fi
+fi
+echo "--------------------------------------------"
+pycheck="""
+from scipy.special import betaln, comb;
+from scipy.optimize import minimize;
+import numpy, argparse, csv, math
+"""
+$python -c "$pycheck" || { [ ! $? -eq 0 ] && echo "ERROR: python module not found" >&2 && exit 1;}
+
+# path of output
+fq1f=$to/filtered_1.fastq # filtered read 1
+fq2f=$to/filtered_2.fastq # filtered read 2
+bed_list=$to/bedlist.txt # bed spllit file list
+bed_prefix=$to/tmp/refsnppos.split # bed split file prefix
+pileup=$to/output.pileup # output of mpileup
+vcf=$to/output.pileup.vcf # output of varscan
+mkdir -p $to/ $to/tmp
+if [ "$mode" != "BAM" ]; then
+    bam=$to/align/Aligned.sortedByCoord.out.bam # mapped read
+    bam_tmp=$to/align/Aligned.out.bam # unsorted mapped read
+    mkdir -p $to/align/
+fi
+
+
+time_start=$(date +%s)
+
+if [ "$mode" == "PAIRED-END" ] || [ "$mode" == "SINGLE-END" ]; then
+
+    echo "## k-mer Processing Phase ##"
+    # echo "# filter start:" `date`
+    if [ -f $fq2 ]; then # paired
+        echo -e "$fq1\n$fq2" > $to/fqlist
+    else # single
+        echo -e "$fq1" > $to/fqlist
+    fi
+
+    # 1. KMC to process FASTQ files
+    echo "Running KMC on FASTQ input..."
+    cmd="$kmc -hp -t$cpu -k$k -cs100000 -ci$K @$to/fqlist $to/samplekmer $to/" # CS10000, for DB8
+    eval "$cmd" || { echo "ERROR: KMC processing failed" >&2; exit 1; }
+
+    # 2. Intersect k-mers with SNP database
+    echo "Intersecting sample k-mers with SNP k-mers..."
+    cmd="$kmctools -hp -t$cpu simple $to/samplekmer $churu_index/${nucl}.kmerdb.fa.kmc intersect $to/kmers_intersect -ocleft"
+    eval "$cmd" || { echo "ERROR: Intersecting k-mers failed" >&2; exit 1; }
+
+    # 3. Dump intersect results to text for further processing
+    echo "Dumping k-mers to text..."
+    cmd="$kmctools -hp -t$cpu transform $to/kmers_intersect dump $to/kmers_intersect.txt"
+    eval "$cmd" || { echo "ERROR: Dumping k-mers failed" >&2; exit 1; }
+
+    # 4. Prepare SNP and reference pair k-mers
+    echo "Preparing SNP and reference k-mers..."
+    refsnpkmer=$to/refsnpkmer.txt
+    refsnppos=$to/refsnppos.bed
+    refsnplog=$to/refsnp.log
+    cmd="$python $churu_filter $to/kmers_intersect.txt $churu_index/${nucl}.kmerdb.bed $refsnpkmer $refsnppos > $refsnplog"
+    eval "$cmd" || { echo "ERROR: Preparing SNP and reference k-mers failed" >&2; exit 1; }
+
+    # 5. Convert reference SNP k-mers to FASTA
+    echo "Converting SNP k-mers to FASTA..."
+    cmd="$awk '{print \">\"FNR\"\\n\"\$1}' $refsnpkmer > $refsnpkmer.fa"
+    eval "$cmd" || { echo "ERROR: Converting to FASTA failed" >&2; exit 1; }
+
+    # 6. KMC on reference SNP k-mers
+    echo "Running KMC on reference SNP k-mers..."
+    cmd="$kmc -hp -t$cpu -k$k -fm -ci1 $refsnpkmer.fa $to/refsnpkmer $to/"
+    eval "$cmd" || { echo "ERROR: KMC on SNP k-mers failed" >&2; exit 1; }
+
+    # 7. KMC filter on FASTQ to collect SNP reads
+    echo "Running KMC filter on FASTQ..."
+    fqf=$to/filtered.kmc.fastq
+    cmd="$kmctools -hp -t$cpu filter $to/refsnpkmer @$to/fqlist -ci1 $fqf" # to maximize speed
+    eval "$cmd" || { echo "ERROR: KMC filter on FASTQ failed" >&2; exit 1; }
+
+
+    echo "## Read Mapping Phase ##"
+    # echo "# mapping start:" `date`
+    if [[ "$nucl" == "rna" ]]; then
+        # RNA-seq alignment with STAR
+        echo "Aligning RNA-seq reads with STAR..."
+        if [ -d $to/align/STARtmp ]; then rm -rf $to/align/STARtmp; fi
+        cmd="$aligner --genomeLoad $shared --runMode alignReads --runThreadN $cpu --genomeDir $align_index --readFilesIn $fqf --outSAMattributes All --outSAMtype BAM Unsorted --outTmpDir $to/align/STARtmp --outFileNamePrefix $to/align/ && $samtools sort -@ $cpu $bam_tmp > $bam"
+        eval "$cmd" || { echo "ERROR: STAR alignment failed" >&2; exit 1; }
+    elif [[ "$nucl" == "dna" ]]; then
+        # DNA-seq alignment with BWA
+        echo "Aligning DNA-seq reads with BWA..."
+        cmd="$aligner mem -t $cpu $align_index $fqf | $samtools view -Sbh - -@ $cpu | $samtools sort -@ $cpu > $bam"
+        eval "$cmd" || { echo "ERROR: BWA alignment failed" >&2; exit 1; }
+    fi
+    # echo "# mapping end:" `date`
+
+    # echo "# indexing start:" `date`
+    echo "Indexing BAM file..."
+    cmd="$samtools index $bam -@ $cpu"
+    eval "$cmd" || { echo "ERROR: Samtools index failed" >&2; exit 1; }
+    # echo "# indexing end:" `date`
+
+elif [ "$mode" == "BAM" ]; then
+    echo "Processing BAM file directly, skipping k-mer generation and mapping..."
+    refsnppos=$churu_index/common.kmerdb.pos.bed
+fi
+
+
+echo "## Pileup Generation ##"
+# Calculate the number of lines and determine lines per split file
+n_lines=$($wc -l $refsnppos | $cut -f1 -d" ")
+n=3 # This value can be adjusted based on the desired granularity and system capacity
+n_line_per_file=$(echo "( $n_lines / ( $cpu * $n ) ) + 1" | bc)
+
+# Split the reference SNP positions into smaller files for parallel processing
+cmd="$split -d -a 3 -l $n_line_per_file $refsnppos $bed_prefix" # split
+eval "$cmd" || { echo "ERROR: Bed file splliting failed" >&2; exit 1; }
+
+cmd="ls "$bed_prefix*" > $bed_list" # save the list of splitted files
+eval "$cmd" || { echo "ERROR: Creating list of bed file failed" >&2; exit 1; }
+# echo "# bed prep end:" `date`
+
+# TODO: consider use of -B parameter (https://varscan.sourceforge.net/germline-calling.html)
+# echo "# mpileup start:" `date`
+echo "Generating pileup file..."
+cmd="$parallel -j $cpu --colsep '\t' $samtools mpileup $bam -l {1} -f $genome '|' $awk \'\\\$4 \>= $mpileup_cut\' :::: $bed_list > $pileup 2> /dev/null"
+eval "$cmd" || { echo "ERROR: Generating pileup failed" >&2; exit 1; }
+# echo "# mpileup end:" `date`
+
+
+echo "## Variant Calling ##"
+# echo "# varscan start:" `date`
+echo "Calling variants..."
+cmd="$java -jar $varscan mpileup2snp $pileup --output-vcf 1 > $vcf"
+eval "$cmd" || { echo "ERROR: Variant calling failed" >&2; exit 1; }
+# echo "# varscan end:" `date`
+
+
+echo "## Identification and Reporting ##"
+# echo "# identify start:" `date`
+cell_pval=$to/churu.out
+param=""
+if $force; then param="--force-estimation"; fi
+if [ -n "$ccle_model" ]; then param="$param --ccle-model-file $ccle_model"; fi
+if [ -n "$ccle_expr" ]; then param="$param --ccle-expression-file $ccle_expr"; fi
+echo "Identifying cell line..."
+cmd="$python $churu_identify $vcf $ccle_var $param --nucl $nucl -o $cell_pval"
+eval "$cmd" || { echo "ERROR: Cell line identification failled" >&2; exit 1; }
+# echo "# identify end:" `date`
+
+
+time_end=$(date +%s)
+runtime=$((time_end - time_start))
+echo "## Final Output ##"
+echo "  Output has been generated in: $to"
+echo "  Processing completed. Start time was: $(date -d @$time_start)"
+echo "  End time was: $(date -d @$time_end)"
+echo "  Total runtime: $runtime seconds"
+echo ""
+
+# Clean-up if necessary
+echo "Cleaning up temporary files..."
+if [ "$mode" != "BAM" ]; then
+    rm $to/fqlist
+    rm $to/filtered.kmc.fastq
+    rm $to/kmers_intersect*
+    rm $to/refsnp*
+    rm $to/samplekmer*
+fi
+rm $to/bedlist.txt
+rm -rf $to/tmp
+
+echo "All processes completed successfully."
