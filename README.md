@@ -21,10 +21,10 @@ cd churu
 ```
 
 ### **2. Install Dependencies**
-Install the required Python libraries and third-party tools.:
+Install the required Python libraries and third-party tools:
 ```bash
 pip install scipy pyfaidx
-bash ./setup/install_[DEPENDENCIES].sh  # Installation scripts VarScan, KMC, BWA, STAR, SAMtools
+bash ./setup/install_[DEPENDENCIES].sh  # Installation scripts for VarScan, KMC, BWA, STAR, SAMtools
 ```
 
 Ensure the following dependencies are installed:
@@ -45,7 +45,7 @@ To ensure compatibility with specific CCLE versions, download the required resou
 - **Genome and annotation:** [GENCODE v34 + hg38](https://www.gencodegenes.org/human/release_34.html)
   - Annotation (gtf): [download here](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/gencode.v34.annotation.gtf.gz)
   - Transcript (fa): [download here](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/gencode.v34.transcripts.fa.gz)
-  - Genome (FA): [download here](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh38.primary_assembly.genome.fa.gz)
+  - Genome (fa): [download here](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/GRCh38.primary_assembly.genome.fa.gz)
 
 - **CCLE 22Q4:** [DepMap portal](https://depmap.org/portal/download/all/)  
   - Somatic Variants: *OmicsSomaticMutations.csv*
